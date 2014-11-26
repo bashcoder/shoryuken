@@ -22,10 +22,14 @@ module Shoryuken
         end
       end
 
-      setup_options(args)
+      setup_options(args) do |cli_options|
+        # this needs to happen before configuration is parsed, since it may depend on Rails env
+        load_rails if cli_options[:rails]
+      end
       initialize_logger
       require_workers
       validate!
+      patch_deprecated_workers!
       daemonize
       write_pid
       load_celluloid
@@ -58,6 +62,25 @@ module Shoryuken
       Celluloid.logger = (Shoryuken.options[:verbose] ? Shoryuken.logger : nil)
 
       require 'shoryuken/manager'
+    end
+
+    def load_rails
+      # Adapted from: https://github.com/mperham/sidekiq/blob/master/lib/sidekiq/cli.rb
+
+      require 'rails'
+      if ::Rails::VERSION::MAJOR < 4
+        require File.expand_path("config/environment.rb")
+        ::Rails.application.eager_load!
+      else
+        # Painful contortions, see 1791 for discussion
+        require File.expand_path("config/application.rb")
+        ::Rails::Application.initializer "shoryuken.eager_load" do
+          ::Rails.application.config.eager_load = true
+        end
+        require File.expand_path("config/environment.rb")
+      end
+
+      logger.info "Rails environment loaded"
     end
 
     def daemonize
@@ -124,6 +147,10 @@ module Shoryuken
           opts[:config_file] = arg
         end
 
+        o.on '-R', '--rails', 'Load Rails' do |arg|
+          opts[:rails] = arg
+        end
+
         o.on '-L', '--logfile PATH', 'Path to writable logfile' do |arg|
           opts[:logfile] = arg
         end
@@ -144,7 +171,7 @@ module Shoryuken
 
       @parser.banner = 'shoryuken [options]'
       @parser.on_tail '-h', '--help', 'Show help' do
-        Shoryuken.logger.info @parser
+        logger.info @parser
         exit 1
       end
       @parser.parse!(argv)
@@ -152,22 +179,22 @@ module Shoryuken
     end
 
     def handle_signal(sig)
-      Shoryuken.logger.info "Got #{sig} signal"
+      logger.info "Got #{sig} signal"
 
       case sig
       when 'USR1'
-        Shoryuken.logger.info "Received USR1, will soft shutdown down"
+        logger.info "Received USR1, will soft shutdown down"
 
         launcher.stop
 
         exit 0
       when 'TTIN'
         Thread.list.each do |thread|
-          Shoryuken.logger.info "Thread TID-#{thread.object_id.to_s(36)} #{thread['label']}"
+          logger.info "Thread TID-#{thread.object_id.to_s(36)} #{thread['label']}"
           if thread.backtrace
-            Shoryuken.logger.info thread.backtrace.join("\n")
+            logger.info thread.backtrace.join("\n")
           else
-            Shoryuken.logger.info "<no backtrace available>"
+            logger.info "<no backtrace available>"
           end
         end
 
@@ -175,9 +202,9 @@ module Shoryuken
         busy   = launcher.manager.instance_variable_get(:@busy).size
         queues = launcher.manager.instance_variable_get(:@queues)
 
-        Shoryuken.logger.info "Ready: #{ready}, Busy: #{busy}, Active Queues: #{unparse_queues(queues)}"
+        logger.info "Ready: #{ready}, Busy: #{busy}, Active Queues: #{unparse_queues(queues)}"
       else
-        Shoryuken.logger.info "Received #{sig}, will shutdown down"
+        logger.info "Received #{sig}, will shutdown down"
 
         raise Interrupt
       end
@@ -185,6 +212,9 @@ module Shoryuken
 
     def setup_options(args)
       options = parse_options(args)
+
+      # yield parsed options in case we need to do more setup before configuration is parsed
+      yield(options) if block_given?
 
       config = options[:config_file] ? parse_config(options[:config_file]).deep_symbolize_keys : {}
 
@@ -212,8 +242,8 @@ module Shoryuken
     def validate!
       raise ArgumentError, 'No queues supplied' if Shoryuken.queues.empty?
 
-      if queue_without_worker = Shoryuken.queues.find { |queue| Shoryuken.workers[queue].nil? }
-        raise ArgumentError, "No worker supplied for #{queue_without_worker}"
+      Shoryuken.queues.each do |queue|
+        logger.warn "No worker supplied for '#{queue}'" unless Shoryuken.workers.include? queue
       end
 
       if Shoryuken.options[:aws][:access_key_id].nil? && Shoryuken.options[:aws][:secret_access_key].nil?
@@ -252,6 +282,22 @@ module Shoryuken
 
     def parse_queue(queue, weight = nil)
       [weight.to_i, 1].max.times { Shoryuken.queues << queue }
+    end
+
+    def patch_deprecated_workers!
+      Shoryuken.workers.each do |queue, worker_class|
+        if worker_class.instance_method(:perform).arity == 1
+          logger.warn "[DEPRECATION] #{worker_class.name}#perform(sqs_msg) is deprecated. Please use #{worker_class.name}#perform(sqs_msg, body)"
+
+          worker_class.class_eval do
+            alias_method :deprecated_perform, :perform
+
+            def perform(sqs_msg, body = nil)
+              deprecated_perform(sqs_msg)
+            end
+          end
+        end
+      end
     end
   end
 end

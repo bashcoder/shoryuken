@@ -13,17 +13,22 @@ module Shoryuken
       # AWS limits the batch size by 10
       limit = limit > FETCH_LIMIT ? FETCH_LIMIT : limit
 
-      Shoryuken::Client.receive_message queue, Shoryuken.options[:aws][:receive_message].to_h.merge(limit: limit)
+      options = Shoryuken.options[:aws][:receive_message].to_h
+      options[:limit] = limit
+      options[:message_attribute_names] ||= []
+      options[:message_attribute_names] << 'shoryuken_class'
+
+      Shoryuken::Client.receive_message queue, options
     end
 
     def fetch(queue, available_processors)
       watchdog('Fetcher#fetch died') do
         started_at = Time.now
 
-        logger.info "Looking for new messages '#{queue}'"
+        logger.debug "Looking for new messages in '#{queue}'"
 
         begin
-          batch = !!Shoryuken.workers[queue].get_shoryuken_options['batch']
+          batch = !!(Shoryuken.workers[queue] && Shoryuken.workers[queue].get_shoryuken_options['batch'])
 
           limit = batch ? FETCH_LIMIT : available_processors
 
@@ -38,7 +43,7 @@ module Shoryuken
 
             @manager.async.rebalance_queue_weight!(queue)
           else
-            logger.info "No message found for '#{queue}'"
+            logger.debug "No message found for '#{queue}'"
 
             @manager.async.pause_queue!(queue)
           end

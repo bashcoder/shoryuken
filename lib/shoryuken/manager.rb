@@ -103,7 +103,7 @@ module Shoryuken
     def pause_queue!(queue)
       return if !@queues.include?(queue) || Shoryuken.options[:delay].to_f <= 0
 
-      logger.info "Pausing '#{queue}' for #{Shoryuken.options[:delay].to_f} seconds, because it's empty"
+      logger.debug "Pausing '#{queue}' for #{Shoryuken.options[:delay].to_f} seconds, because it's empty"
 
       @queues.delete(queue)
 
@@ -139,7 +139,7 @@ module Shoryuken
       return if stopped?
 
       unless @queues.include? queue
-        logger.info "Restarting '#{queue}'"
+        logger.debug "Restarting '#{queue}'"
 
         @queues << queue
 
@@ -169,7 +169,21 @@ module Shoryuken
     def next_queue
       return nil if @queues.empty?
 
+      # get/remove the first queue in the list
       queue = @queues.shift
+
+
+      unless Shoryuken.workers.include? queue
+        # when no worker registered pause the queue to avoid endless recursion
+
+        logger.debug "Pausing '#{queue}' for #{Shoryuken.options[:delay].to_f} seconds, because of no workers registered"
+
+        after(Shoryuken.options[:delay].to_f) { async.restart_queue!(queue) }
+
+        return next_queue
+      end
+
+      # add queue back to the end of the list
       @queues << queue
 
       queue

@@ -1,11 +1,20 @@
 class DefaultWorker
   include Shoryuken::Worker
 
-  shoryuken_options queue: 'default', delete: true
+  shoryuken_options queue: 'default', auto_delete: true
 
-  def perform(sqs_msg)
-    puts "DefaultWorker: '#{sqs_msg.body}'"
+  def perform(sqs_msg, body)
+    puts "DefaultWorker: '#{body}'"
+  end
+end
 
-    sleep rand(0..1)
+# multiple workers for the same queue
+class DefaultWorker2
+  include Shoryuken::Worker
+
+  shoryuken_options queue: 'default', auto_delete: true
+
+  def perform(sqs_msg, body)
+    puts "DefaultWorker2: '#{body}'"
   end
 end
